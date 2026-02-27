@@ -654,45 +654,38 @@ export default function Page() {
           properties: parsedProperties,
         };
 
-        // Step 2: Fire the POST to configured endpoint
-        const trackUrl = `${config.baseUrl.replace(/\/$/, '')}/track`;
-
-        const headers: Record<string, string> = {
-          'Content-Type': 'application/json',
-        };
-        if (config.authToken.trim()) {
-          headers['Authorization'] = `Bearer ${config.authToken}`;
-        }
+        // Step 2: Fire the POST via server-side proxy to avoid CORS/localhost issues
+        const targetUrl = `${config.baseUrl.replace(/\/$/, '')}/track`;
 
         try {
-          const response = await fetch(trackUrl, {
+          const proxyResponse = await fetch('/api/track', {
             method: 'POST',
-            headers,
-            body: JSON.stringify(payload),
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              target_url: targetUrl,
+              auth_token: config.authToken,
+              payload,
+            }),
           });
 
-          let responseText = '';
-          try {
-            responseText = await response.text();
-          } catch {
-            responseText = '(unable to read response body)';
-          }
-
-          const isSuccess = response.status >= 200 && response.status < 300;
+          const proxyData = await proxyResponse.json();
+          const statusCode = proxyData.status_code ?? null;
+          const responseBody = proxyData.body ?? proxyData.error ?? '(empty response)';
+          const isSuccess = statusCode !== null && statusCode >= 200 && statusCode < 300;
 
           addHistoryEntry({
             id: generateId(),
             timestamp: new Date().toISOString(),
             eventName: payload.event,
-            statusCode: response.status,
-            responseBody: responseText,
+            statusCode,
+            responseBody,
             success: isSuccess,
           });
 
           showNotification(
             isSuccess
-              ? `${payload.event} -- ${response.status} OK${data?.status_message ? ' -- ' + data.status_message : ''}`
-              : `${payload.event} -- ${response.status} FAILED`,
+              ? `${payload.event} -- ${statusCode} OK${data?.status_message ? ' -- ' + data.status_message : ''}`
+              : `${payload.event} -- ${statusCode ?? 'ERR'} ${proxyData.status_text || 'FAILED'}`,
             isSuccess ? 'success' : 'error'
           );
         } catch (networkErr) {
@@ -703,10 +696,10 @@ export default function Page() {
             timestamp: new Date().toISOString(),
             eventName: payload.event,
             statusCode: null,
-            responseBody: `Network Error: ${errMsg}`,
+            responseBody: `Proxy Error: ${errMsg}`,
             success: false,
           });
-          showNotification(`Network error: ${errMsg}`, 'error');
+          showNotification(`Proxy error: ${errMsg}`, 'error');
         }
       } catch (err) {
         const errMsg = err instanceof Error ? err.message : 'Unknown error';
