@@ -346,6 +346,9 @@ function ConfigPanel({
           SAVE CONFIG
         </button>
       </div>
+      <p className="mt-2 font-mono text-[10px] tracking-wider text-muted-foreground">
+        Your backend must have CORS enabled to accept requests from this origin. Events POST to {'{base_url}'}/track.
+      </p>
     </div>
   );
 }
@@ -654,52 +657,66 @@ export default function Page() {
           properties: parsedProperties,
         };
 
-        // Step 2: Fire the POST via server-side proxy to avoid CORS/localhost issues
-        const targetUrl = `${config.baseUrl.replace(/\/$/, '')}/track`;
+        // Step 2: Fire POST directly to the user's configured endpoint
+        const trackUrl = `${config.baseUrl.replace(/\/$/, '')}/track`;
+
+        const trackHeaders: Record<string, string> = {
+          'Content-Type': 'application/json',
+        };
+        if (config.authToken.trim()) {
+          trackHeaders['Authorization'] = `Bearer ${config.authToken}`;
+        }
 
         try {
-          const proxyResponse = await fetch('/api/track', {
+          const response = await fetch(trackUrl, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              target_url: targetUrl,
-              auth_token: config.authToken,
-              payload,
-            }),
+            headers: trackHeaders,
+            body: JSON.stringify(payload),
           });
 
-          const proxyData = await proxyResponse.json();
-          const statusCode = proxyData.status_code ?? null;
-          const responseBody = proxyData.body ?? proxyData.error ?? '(empty response)';
-          const isSuccess = statusCode !== null && statusCode >= 200 && statusCode < 300;
+          let responseText = '';
+          try {
+            responseText = await response.text();
+          } catch {
+            responseText = '(unable to read response body)';
+          }
+
+          const isSuccess = response.status >= 200 && response.status < 300;
 
           addHistoryEntry({
             id: generateId(),
             timestamp: new Date().toISOString(),
             eventName: payload.event,
-            statusCode,
-            responseBody,
+            statusCode: response.status,
+            responseBody: responseText,
             success: isSuccess,
           });
 
           showNotification(
             isSuccess
-              ? `${payload.event} -- ${statusCode} OK${data?.status_message ? ' -- ' + data.status_message : ''}`
-              : `${payload.event} -- ${statusCode ?? 'ERR'} ${proxyData.status_text || 'FAILED'}`,
+              ? `${payload.event} -- ${response.status} OK${data?.status_message ? ' -- ' + data.status_message : ''}`
+              : `${payload.event} -- ${response.status} FAILED`,
             isSuccess ? 'success' : 'error'
           );
         } catch (networkErr) {
+          // Network errors (CORS, unreachable, etc.)
           const errMsg =
             networkErr instanceof Error ? networkErr.message : 'Network error';
+
+          const isCorsLikely = errMsg === 'Failed to fetch' || errMsg.includes('NetworkError');
+          const displayMsg = isCorsLikely
+            ? `Cannot reach ${trackUrl}. Ensure your backend is running and has CORS enabled for this origin.`
+            : errMsg;
+
           addHistoryEntry({
             id: generateId(),
             timestamp: new Date().toISOString(),
             eventName: payload.event,
             statusCode: null,
-            responseBody: `Proxy Error: ${errMsg}`,
+            responseBody: displayMsg,
             success: false,
           });
-          showNotification(`Proxy error: ${errMsg}`, 'error');
+          showNotification(displayMsg, 'error');
         }
       } catch (err) {
         const errMsg = err instanceof Error ? err.message : 'Unknown error';
