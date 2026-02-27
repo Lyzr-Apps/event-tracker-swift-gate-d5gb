@@ -13,6 +13,9 @@ import {
   VscHistory,
   VscPlay,
   VscCircleFilled,
+  VscCopy,
+  VscChevronDown,
+  VscChevronRight,
 } from 'react-icons/vsc';
 
 // --- TypeScript Interfaces ---
@@ -32,7 +35,10 @@ interface EventHistoryEntry {
   eventName: string;
   statusCode: number | null;
   responseBody: string;
+  curlCommand: string;
+  payload: string;
   success: boolean;
+  pending: boolean;
 }
 
 interface InlineNotification {
@@ -61,49 +67,6 @@ const USER_ACTION_EVENTS = [
   { name: 'user_signup', label: 'user_signup' },
   { name: 'feature_used', label: 'feature_used' },
   { name: 'session_started', label: 'session_started' },
-];
-
-const SAMPLE_HISTORY: EventHistoryEntry[] = [
-  {
-    id: 'sample-1',
-    timestamp: '2025-02-27T14:32:01.000Z',
-    eventName: 'agent_created',
-    statusCode: 200,
-    responseBody: '{"status":"ok","received":true}',
-    success: true,
-  },
-  {
-    id: 'sample-2',
-    timestamp: '2025-02-27T14:31:45.000Z',
-    eventName: 'user_login',
-    statusCode: 200,
-    responseBody: '{"status":"ok","received":true}',
-    success: true,
-  },
-  {
-    id: 'sample-3',
-    timestamp: '2025-02-27T14:31:22.000Z',
-    eventName: 'feature_used',
-    statusCode: 401,
-    responseBody: '{"error":"unauthorized"}',
-    success: false,
-  },
-  {
-    id: 'sample-4',
-    timestamp: '2025-02-27T14:30:58.000Z',
-    eventName: 'session_started',
-    statusCode: 200,
-    responseBody: '{"status":"ok","received":true}',
-    success: true,
-  },
-  {
-    id: 'sample-5',
-    timestamp: '2025-02-27T14:30:12.000Z',
-    eventName: 'agent_deleted',
-    statusCode: 500,
-    responseBody: '{"error":"internal server error"}',
-    success: false,
-  },
 ];
 
 const MAX_HISTORY = 50;
@@ -164,16 +127,35 @@ function formatTimestamp(iso: string): string {
   }
 }
 
-function formatDate(iso: string): string {
+// --- Helper: build curl command ---
+
+function buildCurlCommand(
+  url: string,
+  authToken: string,
+  payload: Record<string, unknown>
+): string {
+  const parts = [`curl -X POST ${url}`];
+  if (authToken.trim()) {
+    parts.push(`  -H "Authorization: Bearer ${authToken}"`);
+  }
+  parts.push(`  -H "Content-Type: application/json"`);
+  parts.push(`  -d '${JSON.stringify(payload, null, 2)}'`);
+  return parts.join(' \\\n');
+}
+
+// --- Helper: detect if URL is localhost ---
+
+function isLocalhostUrl(url: string): boolean {
   try {
-    const d = new Date(iso);
-    return d.toLocaleDateString('en-US', {
-      year: 'numeric',
-      month: 'short',
-      day: 'numeric',
-    });
+    const parsed = new URL(url);
+    return (
+      parsed.hostname === 'localhost' ||
+      parsed.hostname === '127.0.0.1' ||
+      parsed.hostname === '0.0.0.0' ||
+      parsed.hostname === '::1'
+    );
   } catch {
-    return iso;
+    return false;
   }
 }
 
@@ -260,7 +242,7 @@ function EventButton({
       <VscPlay className={`w-3.5 h-3.5 flex-shrink-0 ${loading ? 'animate-spin' : ''}`} />
       <span className="flex-1">{eventName}</span>
       {loading && (
-        <span className="text-primary text-[10px]">FIRING...</span>
+        <span className="text-primary text-[10px]">GENERATING...</span>
       )}
     </button>
   );
@@ -347,9 +329,153 @@ function ConfigPanel({
         </button>
       </div>
       <p className="mt-2 font-mono text-[10px] tracking-wider text-muted-foreground">
-        Your backend must have CORS enabled to accept requests from this origin. Events POST to {'{base_url}'}/track.
+        Events POST to {'{'} base_url {'}'}/track. For localhost URLs, a ready-to-run curl command is generated.
       </p>
     </div>
+  );
+}
+
+// --- Copy Button Component ---
+
+function CopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = useCallback(async () => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // Fallback
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }
+  }, [text]);
+
+  return (
+    <button
+      onClick={handleCopy}
+      className={`flex items-center gap-1 px-2 py-1 border font-mono text-[10px] tracking-wider transition-colors ${
+        copied
+          ? 'border-primary text-primary bg-primary/10'
+          : 'border-border text-muted-foreground hover:text-foreground hover:border-primary'
+      }`}
+    >
+      {copied ? <VscCheck className="w-3 h-3" /> : <VscCopy className="w-3 h-3" />}
+      {copied ? 'COPIED' : 'COPY'}
+    </button>
+  );
+}
+
+// --- History Row with Expandable Details ---
+
+function HistoryRow({ entry }: { entry: EventHistoryEntry }) {
+  const [expanded, setExpanded] = useState(false);
+
+  return (
+    <>
+      <tr
+        className="border-b border-border/50 hover:bg-muted/20 transition-colors cursor-pointer"
+        onClick={() => setExpanded(!expanded)}
+      >
+        <td className="px-4 py-2.5 font-mono text-[11px] tracking-wider text-muted-foreground whitespace-nowrap">
+          <div className="flex items-center gap-1.5">
+            {expanded ? (
+              <VscChevronDown className="w-3 h-3 flex-shrink-0" />
+            ) : (
+              <VscChevronRight className="w-3 h-3 flex-shrink-0" />
+            )}
+            {formatTimestamp(entry.timestamp)}
+          </div>
+        </td>
+        <td className="px-4 py-2.5 font-mono text-[11px] tracking-wider text-foreground">
+          {entry.eventName}
+        </td>
+        <td className="px-4 py-2.5">
+          {entry.pending ? (
+            <span className="inline-flex items-center gap-1 px-2 py-0.5 font-mono text-[10px] tracking-wider border border-primary/50 text-primary bg-primary/5">
+              <VscCircleFilled className="w-2 h-2 animate-pulse" />
+              READY
+            </span>
+          ) : entry.statusCode !== null ? (
+            <span
+              className={`inline-flex items-center gap-1 px-2 py-0.5 font-mono text-[10px] tracking-wider border ${
+                entry.success
+                  ? 'border-primary/50 text-primary bg-primary/5'
+                  : 'border-destructive/50 text-destructive bg-destructive/5'
+              }`}
+            >
+              {entry.success ? (
+                <VscCheck className="w-3 h-3" />
+              ) : (
+                <VscError className="w-3 h-3" />
+              )}
+              {entry.statusCode}
+            </span>
+          ) : (
+            <span className="inline-flex items-center gap-1 px-2 py-0.5 font-mono text-[10px] tracking-wider border border-destructive/50 text-destructive bg-destructive/5">
+              <VscError className="w-3 h-3" />
+              ERR
+            </span>
+          )}
+        </td>
+        <td className="px-4 py-2.5 font-mono text-[10px] tracking-wider text-muted-foreground max-w-xs truncate">
+          {entry.pending ? 'Payload generated -- expand for curl command' : entry.responseBody}
+        </td>
+      </tr>
+      {expanded && (
+        <tr className="border-b border-border/50">
+          <td colSpan={4} className="px-4 py-3 bg-muted/10">
+            {/* Payload */}
+            <div className="mb-3">
+              <div className="flex items-center justify-between mb-1">
+                <span className="font-mono text-[10px] tracking-wider text-muted-foreground uppercase">
+                  Payload
+                </span>
+                <CopyButton text={entry.payload} />
+              </div>
+              <pre className="font-mono text-[10px] tracking-wider text-foreground bg-background border border-border p-3 overflow-x-auto whitespace-pre-wrap max-h-40 overflow-y-auto">
+                {entry.payload}
+              </pre>
+            </div>
+            {/* Curl Command */}
+            <div className="mb-3">
+              <div className="flex items-center justify-between mb-1">
+                <span className="font-mono text-[10px] tracking-wider text-muted-foreground uppercase">
+                  Curl Command
+                </span>
+                <CopyButton text={entry.curlCommand} />
+              </div>
+              <pre className="font-mono text-[10px] tracking-wider text-primary bg-background border border-border p-3 overflow-x-auto whitespace-pre-wrap max-h-40 overflow-y-auto">
+                {entry.curlCommand}
+              </pre>
+            </div>
+            {/* Response (if not pending) */}
+            {!entry.pending && entry.responseBody && (
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <span className="font-mono text-[10px] tracking-wider text-muted-foreground uppercase">
+                    Response
+                  </span>
+                  <CopyButton text={entry.responseBody} />
+                </div>
+                <pre className="font-mono text-[10px] tracking-wider text-muted-foreground bg-background border border-border p-3 overflow-x-auto whitespace-pre-wrap max-h-40 overflow-y-auto">
+                  {entry.responseBody}
+                </pre>
+              </div>
+            )}
+          </td>
+        </tr>
+      )}
+    </>
   );
 }
 
@@ -392,9 +518,9 @@ function HistoryPanel({
           </p>
         </div>
       ) : (
-        <div className="overflow-x-auto max-h-80 overflow-y-auto">
+        <div className="overflow-x-auto max-h-[500px] overflow-y-auto">
           <table className="w-full">
-            <thead className="sticky top-0 bg-card border-b border-border">
+            <thead className="sticky top-0 bg-card border-b border-border z-10">
               <tr>
                 <th className="text-left px-4 py-2 font-mono text-[10px] tracking-wider text-muted-foreground font-normal uppercase">
                   Timestamp
@@ -412,40 +538,7 @@ function HistoryPanel({
             </thead>
             <tbody>
               {history.map((entry) => (
-                <tr key={entry.id} className="border-b border-border/50 hover:bg-muted/20 transition-colors">
-                  <td className="px-4 py-2.5 font-mono text-[11px] tracking-wider text-muted-foreground whitespace-nowrap">
-                    {formatTimestamp(entry.timestamp)}
-                  </td>
-                  <td className="px-4 py-2.5 font-mono text-[11px] tracking-wider text-foreground">
-                    {entry.eventName}
-                  </td>
-                  <td className="px-4 py-2.5">
-                    {entry.statusCode !== null ? (
-                      <span
-                        className={`inline-flex items-center gap-1 px-2 py-0.5 font-mono text-[10px] tracking-wider border ${
-                          entry.success
-                            ? 'border-primary/50 text-primary bg-primary/5'
-                            : 'border-destructive/50 text-destructive bg-destructive/5'
-                        }`}
-                      >
-                        {entry.success ? (
-                          <VscCheck className="w-3 h-3" />
-                        ) : (
-                          <VscError className="w-3 h-3" />
-                        )}
-                        {entry.statusCode}
-                      </span>
-                    ) : (
-                      <span className="inline-flex items-center gap-1 px-2 py-0.5 font-mono text-[10px] tracking-wider border border-destructive/50 text-destructive bg-destructive/5">
-                        <VscError className="w-3 h-3" />
-                        ERR
-                      </span>
-                    )}
-                  </td>
-                  <td className="px-4 py-2.5 font-mono text-[10px] tracking-wider text-muted-foreground max-w-xs truncate">
-                    {entry.responseBody}
-                  </td>
-                </tr>
+                <HistoryRow key={entry.id} entry={entry} />
               ))}
             </tbody>
           </table>
@@ -497,9 +590,6 @@ export default function Page() {
   const [configSaved, setConfigSaved] = useState(false);
   const [showToken, setShowToken] = useState(false);
 
-  // Sample data toggle
-  const [showSampleData, setShowSampleData] = useState(false);
-
   // Event history
   const [history, setHistory] = useState<EventHistoryEntry[]>([]);
 
@@ -511,19 +601,6 @@ export default function Page() {
 
   // Active agent tracking
   const [activeAgentId, setActiveAgentId] = useState<string | null>(null);
-
-  // Handle sample data toggle
-  useEffect(() => {
-    if (showSampleData) {
-      setConfig({ baseUrl: 'http://localhost:3000', authToken: 'sk-test-abc123def456' });
-      setConfigSaved(true);
-      setHistory(SAMPLE_HISTORY);
-    } else {
-      setConfig({ baseUrl: '', authToken: '' });
-      setConfigSaved(false);
-      setHistory([]);
-    }
-  }, [showSampleData]);
 
   const handleConfigChange = useCallback(
     (field: keyof ConfigState, value: string) => {
@@ -558,6 +635,12 @@ export default function Page() {
     });
   }, []);
 
+  const updateHistoryEntry = useCallback((id: string, updates: Partial<EventHistoryEntry>) => {
+    setHistory((prev) =>
+      prev.map((entry) => (entry.id === id ? { ...entry, ...updates } : entry))
+    );
+  }, []);
+
   const clearHistory = useCallback(() => {
     setHistory([]);
     showNotification('Event history cleared.', 'info');
@@ -587,7 +670,10 @@ export default function Page() {
             eventName,
             statusCode: null,
             responseBody: errMsg,
+            curlCommand: '',
+            payload: '',
             success: false,
+            pending: false,
           });
           setLoadingEvents((prev) => ({ ...prev, [eventName]: false }));
           setActiveAgentId(null);
@@ -604,7 +690,6 @@ export default function Page() {
           try {
             data = JSON.parse(rawResult);
           } catch {
-            // Agent returned a text error or non-JSON
             const errorText = rawResult || rawMessage || 'Agent returned non-JSON response';
             showNotification(`Agent: ${errorText}`, 'error');
             addHistoryEntry({
@@ -613,7 +698,10 @@ export default function Page() {
               eventName,
               statusCode: null,
               responseBody: errorText,
+              curlCommand: '',
+              payload: '',
               success: false,
+              pending: false,
             });
             setLoadingEvents((prev) => ({ ...prev, [eventName]: false }));
             setActiveAgentId(null);
@@ -629,7 +717,10 @@ export default function Page() {
               eventName,
               statusCode: null,
               responseBody: rawResult.text,
+              curlCommand: '',
+              payload: '',
               success: false,
+              pending: false,
             });
             setLoadingEvents((prev) => ({ ...prev, [eventName]: false }));
             setActiveAgentId(null);
@@ -657,66 +748,96 @@ export default function Page() {
           properties: parsedProperties,
         };
 
-        // Step 2: Fire POST directly to the user's configured endpoint
         const trackUrl = `${config.baseUrl.replace(/\/$/, '')}/track`;
+        const curlCmd = buildCurlCommand(trackUrl, config.authToken, payload);
+        const payloadStr = JSON.stringify(payload, null, 2);
+        const entryId = generateId();
+        const isLocalhost = isLocalhostUrl(config.baseUrl);
 
-        const trackHeaders: Record<string, string> = {
-          'Content-Type': 'application/json',
-        };
-        if (config.authToken.trim()) {
-          trackHeaders['Authorization'] = `Bearer ${config.authToken}`;
-        }
-
-        try {
-          const response = await fetch(trackUrl, {
-            method: 'POST',
-            headers: trackHeaders,
-            body: JSON.stringify(payload),
-          });
-
-          let responseText = '';
-          try {
-            responseText = await response.text();
-          } catch {
-            responseText = '(unable to read response body)';
-          }
-
-          const isSuccess = response.status >= 200 && response.status < 300;
-
+        if (isLocalhost) {
+          // Localhost: cannot reach from sandbox -- generate payload + curl, mark as READY
           addHistoryEntry({
-            id: generateId(),
-            timestamp: new Date().toISOString(),
-            eventName: payload.event,
-            statusCode: response.status,
-            responseBody: responseText,
-            success: isSuccess,
-          });
-
-          showNotification(
-            isSuccess
-              ? `${payload.event} -- ${response.status} OK${data?.status_message ? ' -- ' + data.status_message : ''}`
-              : `${payload.event} -- ${response.status} FAILED`,
-            isSuccess ? 'success' : 'error'
-          );
-        } catch (networkErr) {
-          // Network errors (CORS, unreachable, etc.)
-          const errMsg =
-            networkErr instanceof Error ? networkErr.message : 'Network error';
-
-          const isCorsLikely = errMsg === 'Failed to fetch' || errMsg.includes('NetworkError');
-          const displayMsg = isCorsLikely
-            ? `Cannot reach ${trackUrl}. Ensure your backend is running and has CORS enabled for this origin.`
-            : errMsg;
-
-          addHistoryEntry({
-            id: generateId(),
+            id: entryId,
             timestamp: new Date().toISOString(),
             eventName: payload.event,
             statusCode: null,
-            responseBody: displayMsg,
-            success: false,
+            responseBody: '',
+            curlCommand: curlCmd,
+            payload: payloadStr,
+            success: true,
+            pending: true,
           });
-          showNotification(displayMsg, 'error');
+
+          showNotification(
+            `Payload generated for ${payload.event}. Copy the curl command from history to run locally.`,
+            'success'
+          );
+        } else {
+          // Public URL: attempt direct POST, also provide curl as fallback
+          addHistoryEntry({
+            id: entryId,
+            timestamp: new Date().toISOString(),
+            eventName: payload.event,
+            statusCode: null,
+            responseBody: 'Sending...',
+            curlCommand: curlCmd,
+            payload: payloadStr,
+            success: false,
+            pending: true,
+          });
+
+          const trackHeaders: Record<string, string> = {
+            'Content-Type': 'application/json',
+          };
+          if (config.authToken.trim()) {
+            trackHeaders['Authorization'] = `Bearer ${config.authToken}`;
+          }
+
+          try {
+            const response = await fetch(trackUrl, {
+              method: 'POST',
+              headers: trackHeaders,
+              body: JSON.stringify(payload),
+            });
+
+            let responseText = '';
+            try {
+              responseText = await response.text();
+            } catch {
+              responseText = '(unable to read response body)';
+            }
+
+            const isSuccess = response.status >= 200 && response.status < 300;
+
+            updateHistoryEntry(entryId, {
+              statusCode: response.status,
+              responseBody: responseText,
+              success: isSuccess,
+              pending: false,
+            });
+
+            showNotification(
+              isSuccess
+                ? `${payload.event} -- ${response.status} OK${data?.status_message ? ' -- ' + data.status_message : ''}`
+                : `${payload.event} -- ${response.status} FAILED`,
+              isSuccess ? 'success' : 'error'
+            );
+          } catch (networkErr) {
+            const errMsg =
+              networkErr instanceof Error ? networkErr.message : 'Network error';
+
+            updateHistoryEntry(entryId, {
+              statusCode: null,
+              responseBody: `Network error: ${errMsg}. Use the curl command instead.`,
+              success: false,
+              pending: false,
+            });
+
+            showNotification(
+              `Cannot reach ${trackUrl}. Curl command available in history.`,
+              'error'
+            );
+          }
         }
       } catch (err) {
         const errMsg = err instanceof Error ? err.message : 'Unknown error';
@@ -727,17 +848,18 @@ export default function Page() {
           eventName,
           statusCode: null,
           responseBody: errMsg,
+          curlCommand: '',
+          payload: '',
           success: false,
+          pending: false,
         });
       } finally {
         setLoadingEvents((prev) => ({ ...prev, [eventName]: false }));
         setActiveAgentId(null);
       }
     },
-    [configSaved, config, showNotification, addHistoryEntry]
+    [configSaved, config, showNotification, addHistoryEntry, updateHistoryEntry]
   );
-
-  const displayHistory = showSampleData && history.length === 0 ? SAMPLE_HISTORY : history;
 
   return (
     <ErrorBoundary>
@@ -753,23 +875,6 @@ export default function Page() {
               <span className="text-[10px] text-muted-foreground tracking-wider border border-border px-2 py-0.5">
                 v1.0
               </span>
-            </div>
-            <div className="flex items-center gap-3">
-              <label className="flex items-center gap-2 cursor-pointer select-none">
-                <span className="font-mono text-[10px] tracking-wider text-muted-foreground uppercase">
-                  Sample Data
-                </span>
-                <div className="relative">
-                  <input
-                    type="checkbox"
-                    checked={showSampleData}
-                    onChange={(e) => setShowSampleData(e.target.checked)}
-                    className="sr-only peer"
-                  />
-                  <div className="w-8 h-4 border border-border bg-muted peer-checked:bg-primary/30 peer-checked:border-primary transition-colors" />
-                  <div className="absolute top-0.5 left-0.5 w-3 h-3 bg-muted-foreground peer-checked:bg-primary peer-checked:translate-x-4 transition-all" />
-                </div>
-              </label>
             </div>
           </div>
         </header>
@@ -840,7 +945,7 @@ export default function Page() {
           </div>
 
           {/* Not Configured Hint */}
-          {!configSaved && !showSampleData && (
+          {!configSaved && (
             <div className="border border-border bg-muted/20 px-4 py-6 text-center">
               <VscTerminal className="w-6 h-6 text-muted-foreground mx-auto mb-2 opacity-50" />
               <p className="font-mono text-xs tracking-wider text-muted-foreground">
@@ -851,7 +956,7 @@ export default function Page() {
 
           {/* Event History */}
           <HistoryPanel
-            history={displayHistory}
+            history={history}
             onClear={clearHistory}
           />
 
