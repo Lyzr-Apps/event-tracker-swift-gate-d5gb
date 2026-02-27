@@ -1,0 +1,18 @@
+{
+  "agents": {
+    "event_tester_agent": {
+      "agent_id": "69a148443fa1c5bfc0e93fc4",
+      "name": "Event Tester Agent",
+      "description": "Constructs event tracking payloads based on button clicked, fires POST request to configured endpoint with auth token, and interprets the HTTP response to display success/error status",
+      "model": "gpt-4.1",
+      "provider": "openai",
+      "temperature": 0.2,
+      "top_p": 1,
+      "capabilities": {
+        "image_output": false,
+        "voice": false,
+        "file_output": false
+      }
+    }
+  }
+}

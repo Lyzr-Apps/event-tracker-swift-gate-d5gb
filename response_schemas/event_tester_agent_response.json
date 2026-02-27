@@ -1,0 +1,22 @@
+{
+  "agent_name": "Event Tester Agent",
+  "agent_id": "69a148443fa1c5bfc0e93fc4",
+  "description": "Constructs event tracking payloads based on button clicked, fires POST request to configured endpoint with auth token, and interprets the HTTP response to display success/error status",
+  "agent_type": "json",
+  "accessor": "result",
+  "auto_generated": true,
+  "response_schema": {
+    "event_name": "string",
+    "distinct_id": "string",
+    "timestamp": "string",
+    "properties": {},
+    "status_message": "string"
+  },
+  "example_response": {
+    "event_name": "The event type name",
+    "distinct_id": "Generated UUID for the event",
+    "timestamp": "ISO timestamp",
+    "properties": {},
+    "status_message": "Human-readable status message about the event payload"
+  }
+}

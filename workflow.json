@@ -1,0 +1,32 @@
+{
+  "nodes": [
+    {
+      "id": "input_node",
+      "type": "Input",
+      "label": "User Event Click",
+      "nodeCategory": "input"
+    },
+    {
+      "id": "event_tester_agent",
+      "type": "Agent",
+      "label": "Event Tester Agent",
+      "nodeCategory": "agent"
+    },
+    {
+      "id": "output_node",
+      "type": "Output",
+      "label": "Response Output",
+      "nodeCategory": "end"
+    }
+  ],
+  "edges": [
+    {
+      "source": "input_node",
+      "target": "event_tester_agent"
+    },
+    {
+      "source": "event_tester_agent",
+      "target": "output_node"
+    }
+  ]
+}
