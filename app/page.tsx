@@ -21,6 +21,7 @@ interface AgentResponse {
   event_name?: string;
   distinct_id?: string;
   timestamp?: string;
+  properties_json?: string;
   properties?: Record<string, unknown>;
   status_message?: string;
 }
@@ -590,14 +591,67 @@ export default function Page() {
           return;
         }
 
-        // Extract response data
-        const data: AgentResponse = agentResult?.response?.result ?? {};
+        // Extract response data - handle multiple response shapes
+        let data: AgentResponse = {};
+        const rawResult = agentResult?.response?.result;
+        const rawMessage = agentResult?.response?.message;
+
+        // If result is a string (error or text response), try to parse it
+        if (typeof rawResult === 'string') {
+          try {
+            data = JSON.parse(rawResult);
+          } catch {
+            // Agent returned a text error or non-JSON
+            const errorText = rawResult || rawMessage || 'Agent returned non-JSON response';
+            showNotification(`Agent: ${errorText}`, 'error');
+            addHistoryEntry({
+              id: generateId(),
+              timestamp: new Date().toISOString(),
+              eventName,
+              statusCode: null,
+              responseBody: errorText,
+              success: false,
+            });
+            setLoadingEvents((prev) => ({ ...prev, [eventName]: false }));
+            setActiveAgentId(null);
+            return;
+          }
+        } else if (rawResult && typeof rawResult === 'object') {
+          // Check if it's a text-type error response
+          if ('text' in rawResult && typeof rawResult.text === 'string' && !rawResult.event_name) {
+            showNotification(`Agent: ${rawResult.text}`, 'error');
+            addHistoryEntry({
+              id: generateId(),
+              timestamp: new Date().toISOString(),
+              eventName,
+              statusCode: null,
+              responseBody: rawResult.text,
+              success: false,
+            });
+            setLoadingEvents((prev) => ({ ...prev, [eventName]: false }));
+            setActiveAgentId(null);
+            return;
+          }
+          data = rawResult as AgentResponse;
+        }
+
+        // Parse properties_json string into object if present
+        let parsedProperties: Record<string, unknown> = {};
+        if (data?.properties_json) {
+          try {
+            parsedProperties = JSON.parse(data.properties_json);
+          } catch {
+            parsedProperties = {};
+          }
+        } else if (data?.properties && typeof data.properties === 'object') {
+          parsedProperties = data.properties;
+        }
 
         const payload = {
           event: data?.event_name ?? eventName,
           distinct_id: data?.distinct_id ?? crypto.randomUUID(),
           timestamp: data?.timestamp ?? new Date().toISOString(),
-          properties: data?.properties ?? {},
+          properties: parsedProperties,
         };
 
         // Step 2: Fire the POST to configured endpoint

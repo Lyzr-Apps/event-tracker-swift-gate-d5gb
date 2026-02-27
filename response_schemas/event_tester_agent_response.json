@@ -9,14 +9,14 @@
     "event_name": "string",
     "distinct_id": "string",
     "timestamp": "string",
-    "properties": {},
+    "properties_json": "string (JSON-encoded properties object)",
     "status_message": "string"
   },
   "example_response": {
-    "event_name": "The event type name",
-    "distinct_id": "Generated UUID for the event",
-    "timestamp": "ISO timestamp",
-    "properties": {},
-    "status_message": "Human-readable status message about the event payload"
+    "event_name": "agent_created",
+    "distinct_id": "550e8400-e29b-41d4-a716-446655440000",
+    "timestamp": "2026-02-27T07:37:58.000Z",
+    "properties_json": "{\"agent_name\":\"support-bot\",\"agent_type\":\"chat\"}",
+    "status_message": "Test payload generated for agent_created event"
   }
 }
