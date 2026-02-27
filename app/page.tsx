@@ -1,7 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { callAIAgent } from '@/lib/aiAgent';
+import React, { useState, useCallback, useRef, useEffect } from 'react';
 import {
   VscTerminal,
   VscCheck,
@@ -20,15 +19,6 @@ import {
 
 // --- TypeScript Interfaces ---
 
-interface AgentResponse {
-  event_name?: string;
-  distinct_id?: string;
-  timestamp?: string;
-  properties_json?: string;
-  properties?: Record<string, unknown>;
-  status_message?: string;
-}
-
 interface EventHistoryEntry {
   id: string;
   timestamp: string;
@@ -38,7 +28,6 @@ interface EventHistoryEntry {
   curlCommand: string;
   payload: string;
   success: boolean;
-  pending: boolean;
 }
 
 interface InlineNotification {
@@ -54,8 +43,6 @@ interface ConfigState {
 
 // --- Constants ---
 
-const EVENT_TESTER_AGENT_ID = '69a148443fa1c5bfc0e93fc4';
-
 const AGENT_LIFECYCLE_EVENTS = [
   { name: 'agent_created', label: 'agent_created' },
   { name: 'agent_updated', label: 'agent_updated' },
@@ -70,6 +57,90 @@ const USER_ACTION_EVENTS = [
 ];
 
 const MAX_HISTORY = 50;
+
+// --- Test data generators per event type ---
+
+const EVENT_PROPERTIES: Record<string, () => Record<string, unknown>> = {
+  agent_created: () => ({
+    agent_name: `agent-${Math.random().toString(36).substring(2, 8)}`,
+    agent_type: ['chat', 'task', 'workflow'][Math.floor(Math.random() * 3)],
+    plan: ['free', 'premium', 'enterprise'][Math.floor(Math.random() * 3)],
+  }),
+  agent_updated: () => ({
+    agent_name: `agent-${Math.random().toString(36).substring(2, 8)}`,
+    updated_fields: ['instructions', 'model', 'temperature', 'tools'][Math.floor(Math.random() * 4)],
+    previous_model: 'gpt-4',
+    new_model: 'gpt-4.1',
+  }),
+  agent_deleted: () => ({
+    agent_name: `agent-${Math.random().toString(36).substring(2, 8)}`,
+    reason: ['user_request', 'cleanup', 'migration'][Math.floor(Math.random() * 3)],
+    total_sessions: Math.floor(Math.random() * 500),
+  }),
+  user_login: () => ({
+    user_email: `user${Math.floor(Math.random() * 1000)}@example.com`,
+    login_method: ['email', 'google', 'github'][Math.floor(Math.random() * 3)],
+    ip_address: `192.168.${Math.floor(Math.random() * 255)}.${Math.floor(Math.random() * 255)}`,
+  }),
+  user_signup: () => ({
+    user_email: `newuser${Math.floor(Math.random() * 1000)}@example.com`,
+    signup_source: ['organic', 'referral', 'campaign'][Math.floor(Math.random() * 3)],
+    plan: ['free', 'trial'][Math.floor(Math.random() * 2)],
+  }),
+  feature_used: () => ({
+    feature_name: ['knowledge_base', 'voice_agent', 'image_gen', 'scheduler'][Math.floor(Math.random() * 4)],
+    user_email: `user${Math.floor(Math.random() * 1000)}@example.com`,
+    duration_ms: Math.floor(Math.random() * 5000),
+  }),
+  session_started: () => ({
+    user_email: `user${Math.floor(Math.random() * 1000)}@example.com`,
+    agent_id: crypto.randomUUID().substring(0, 24),
+    session_type: ['chat', 'voice', 'api'][Math.floor(Math.random() * 3)],
+  }),
+};
+
+// --- Helpers ---
+
+function generateId(): string {
+  return Math.random().toString(36).substring(2, 12) + Date.now().toString(36);
+}
+
+function formatTimestamp(iso: string): string {
+  try {
+    const d = new Date(iso);
+    return d.toLocaleTimeString('en-US', {
+      hour12: false,
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    });
+  } catch {
+    return iso;
+  }
+}
+
+function buildCurlCommand(
+  url: string,
+  authToken: string,
+  payload: Record<string, unknown>
+): string {
+  const parts = [`curl -X POST ${url}`];
+  if (authToken.trim()) {
+    parts.push(`  -H "Authorization: Bearer ${authToken}"`);
+  }
+  parts.push(`  -H "Content-Type: application/json"`);
+  parts.push(`  -d '${JSON.stringify(payload, null, 2)}'`);
+  return parts.join(' \\\n');
+}
+
+function buildPayload(eventName: string): Record<string, unknown> {
+  const propsGenerator = EVENT_PROPERTIES[eventName];
+  return {
+    event: eventName,
+    distinct_id: crypto.randomUUID(),
+    properties: propsGenerator ? propsGenerator() : {},
+  };
+}
 
 // --- ErrorBoundary ---
 
@@ -105,61 +176,7 @@ class ErrorBoundary extends React.Component<
   }
 }
 
-// --- Helper: generate simple ID ---
-
-function generateId(): string {
-  return Math.random().toString(36).substring(2, 12) + Date.now().toString(36);
-}
-
-// --- Helper: format timestamp ---
-
-function formatTimestamp(iso: string): string {
-  try {
-    const d = new Date(iso);
-    return d.toLocaleTimeString('en-US', {
-      hour12: false,
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-    });
-  } catch {
-    return iso;
-  }
-}
-
-// --- Helper: build curl command ---
-
-function buildCurlCommand(
-  url: string,
-  authToken: string,
-  payload: Record<string, unknown>
-): string {
-  const parts = [`curl -X POST ${url}`];
-  if (authToken.trim()) {
-    parts.push(`  -H "Authorization: Bearer ${authToken}"`);
-  }
-  parts.push(`  -H "Content-Type: application/json"`);
-  parts.push(`  -d '${JSON.stringify(payload, null, 2)}'`);
-  return parts.join(' \\\n');
-}
-
-// --- Helper: detect if URL is localhost ---
-
-function isLocalhostUrl(url: string): boolean {
-  try {
-    const parsed = new URL(url);
-    return (
-      parsed.hostname === 'localhost' ||
-      parsed.hostname === '127.0.0.1' ||
-      parsed.hostname === '0.0.0.0' ||
-      parsed.hostname === '::1'
-    );
-  } catch {
-    return false;
-  }
-}
-
-// --- Inline Notification Bar Component ---
+// --- Notification Bar ---
 
 function NotificationBar({
   notification,
@@ -173,9 +190,7 @@ function NotificationBar({
   useEffect(() => {
     if (notification) {
       if (timerRef.current) clearTimeout(timerRef.current);
-      timerRef.current = setTimeout(() => {
-        onDismiss();
-      }, 4000);
+      timerRef.current = setTimeout(onDismiss, 4000);
     }
     return () => {
       if (timerRef.current) clearTimeout(timerRef.current);
@@ -204,17 +219,14 @@ function NotificationBar({
     <div className={`border px-4 py-2 flex items-center gap-3 font-mono text-xs tracking-wider transition-all duration-300 ${bgClass}`}>
       {iconEl}
       <span className="text-foreground flex-1">{notification.message}</span>
-      <button
-        onClick={onDismiss}
-        className="text-muted-foreground hover:text-foreground transition-colors"
-      >
+      <button onClick={onDismiss} className="text-muted-foreground hover:text-foreground transition-colors">
         x
       </button>
     </div>
   );
 }
 
-// --- Event Button Component ---
+// --- Event Button ---
 
 function EventButton({
   eventName,
@@ -241,14 +253,12 @@ function EventButton({
     >
       <VscPlay className={`w-3.5 h-3.5 flex-shrink-0 ${loading ? 'animate-spin' : ''}`} />
       <span className="flex-1">{eventName}</span>
-      {loading && (
-        <span className="text-primary text-[10px]">GENERATING...</span>
-      )}
+      {loading && <span className="text-primary text-[10px]">SENDING...</span>}
     </button>
   );
 }
 
-// --- Config Panel Component ---
+// --- Config Panel ---
 
 function ConfigPanel({
   config,
@@ -312,11 +322,7 @@ function ConfigPanel({
               onClick={onToggleToken}
               className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
             >
-              {showToken ? (
-                <VscEyeClosed className="w-4 h-4" />
-              ) : (
-                <VscEye className="w-4 h-4" />
-              )}
+              {showToken ? <VscEyeClosed className="w-4 h-4" /> : <VscEye className="w-4 h-4" />}
             </button>
           </div>
         </div>
@@ -329,13 +335,13 @@ function ConfigPanel({
         </button>
       </div>
       <p className="mt-2 font-mono text-[10px] tracking-wider text-muted-foreground">
-        Events POST to {'{'} base_url {'}'}/track. For localhost URLs, a ready-to-run curl command is generated.
+        Events POST to {'{'} base_url {'}'}/track. Requests are proxied through this app&apos;s server.
       </p>
     </div>
   );
 }
 
-// --- Copy Button Component ---
+// --- Copy Button ---
 
 function CopyButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false);
@@ -346,7 +352,6 @@ function CopyButton({ text }: { text: string }) {
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch {
-      // Fallback
       const ta = document.createElement('textarea');
       ta.value = text;
       ta.style.position = 'fixed';
@@ -362,7 +367,7 @@ function CopyButton({ text }: { text: string }) {
 
   return (
     <button
-      onClick={handleCopy}
+      onClick={(e) => { e.stopPropagation(); handleCopy(); }}
       className={`flex items-center gap-1 px-2 py-1 border font-mono text-[10px] tracking-wider transition-colors ${
         copied
           ? 'border-primary text-primary bg-primary/10'
@@ -375,7 +380,7 @@ function CopyButton({ text }: { text: string }) {
   );
 }
 
-// --- History Row with Expandable Details ---
+// --- History Row ---
 
 function HistoryRow({ entry }: { entry: EventHistoryEntry }) {
   const [expanded, setExpanded] = useState(false);
@@ -388,11 +393,7 @@ function HistoryRow({ entry }: { entry: EventHistoryEntry }) {
       >
         <td className="px-4 py-2.5 font-mono text-[11px] tracking-wider text-muted-foreground whitespace-nowrap">
           <div className="flex items-center gap-1.5">
-            {expanded ? (
-              <VscChevronDown className="w-3 h-3 flex-shrink-0" />
-            ) : (
-              <VscChevronRight className="w-3 h-3 flex-shrink-0" />
-            )}
+            {expanded ? <VscChevronDown className="w-3 h-3 flex-shrink-0" /> : <VscChevronRight className="w-3 h-3 flex-shrink-0" />}
             {formatTimestamp(entry.timestamp)}
           </div>
         </td>
@@ -400,12 +401,7 @@ function HistoryRow({ entry }: { entry: EventHistoryEntry }) {
           {entry.eventName}
         </td>
         <td className="px-4 py-2.5">
-          {entry.pending ? (
-            <span className="inline-flex items-center gap-1 px-2 py-0.5 font-mono text-[10px] tracking-wider border border-primary/50 text-primary bg-primary/5">
-              <VscCircleFilled className="w-2 h-2 animate-pulse" />
-              READY
-            </span>
-          ) : entry.statusCode !== null ? (
+          {entry.statusCode !== null ? (
             <span
               className={`inline-flex items-center gap-1 px-2 py-0.5 font-mono text-[10px] tracking-wider border ${
                 entry.success
@@ -413,11 +409,7 @@ function HistoryRow({ entry }: { entry: EventHistoryEntry }) {
                   : 'border-destructive/50 text-destructive bg-destructive/5'
               }`}
             >
-              {entry.success ? (
-                <VscCheck className="w-3 h-3" />
-              ) : (
-                <VscError className="w-3 h-3" />
-              )}
+              {entry.success ? <VscCheck className="w-3 h-3" /> : <VscError className="w-3 h-3" />}
               {entry.statusCode}
             </span>
           ) : (
@@ -428,43 +420,34 @@ function HistoryRow({ entry }: { entry: EventHistoryEntry }) {
           )}
         </td>
         <td className="px-4 py-2.5 font-mono text-[10px] tracking-wider text-muted-foreground max-w-xs truncate">
-          {entry.pending ? 'Payload generated -- expand for curl command' : entry.responseBody}
+          {entry.responseBody}
         </td>
       </tr>
       {expanded && (
         <tr className="border-b border-border/50">
           <td colSpan={4} className="px-4 py-3 bg-muted/10">
-            {/* Payload */}
             <div className="mb-3">
               <div className="flex items-center justify-between mb-1">
-                <span className="font-mono text-[10px] tracking-wider text-muted-foreground uppercase">
-                  Payload
-                </span>
+                <span className="font-mono text-[10px] tracking-wider text-muted-foreground uppercase">Payload</span>
                 <CopyButton text={entry.payload} />
               </div>
               <pre className="font-mono text-[10px] tracking-wider text-foreground bg-background border border-border p-3 overflow-x-auto whitespace-pre-wrap max-h-40 overflow-y-auto">
                 {entry.payload}
               </pre>
             </div>
-            {/* Curl Command */}
             <div className="mb-3">
               <div className="flex items-center justify-between mb-1">
-                <span className="font-mono text-[10px] tracking-wider text-muted-foreground uppercase">
-                  Curl Command
-                </span>
+                <span className="font-mono text-[10px] tracking-wider text-muted-foreground uppercase">Curl Command</span>
                 <CopyButton text={entry.curlCommand} />
               </div>
               <pre className="font-mono text-[10px] tracking-wider text-primary bg-background border border-border p-3 overflow-x-auto whitespace-pre-wrap max-h-40 overflow-y-auto">
                 {entry.curlCommand}
               </pre>
             </div>
-            {/* Response (if not pending) */}
-            {!entry.pending && entry.responseBody && (
+            {entry.responseBody && (
               <div>
                 <div className="flex items-center justify-between mb-1">
-                  <span className="font-mono text-[10px] tracking-wider text-muted-foreground uppercase">
-                    Response
-                  </span>
+                  <span className="font-mono text-[10px] tracking-wider text-muted-foreground uppercase">Response</span>
                   <CopyButton text={entry.responseBody} />
                 </div>
                 <pre className="font-mono text-[10px] tracking-wider text-muted-foreground bg-background border border-border p-3 overflow-x-auto whitespace-pre-wrap max-h-40 overflow-y-auto">
@@ -479,7 +462,7 @@ function HistoryRow({ entry }: { entry: EventHistoryEntry }) {
   );
 }
 
-// --- History Table Component ---
+// --- History Panel ---
 
 function HistoryPanel({
   history,
@@ -492,12 +475,8 @@ function HistoryPanel({
     <div className="border border-border bg-card">
       <div className="flex items-center gap-2 px-4 py-3 border-b border-border">
         <VscHistory className="w-4 h-4 text-primary" />
-        <h2 className="font-mono text-sm tracking-wider text-foreground font-semibold">
-          EVENT HISTORY
-        </h2>
-        <span className="font-mono text-[10px] tracking-wider text-muted-foreground">
-          [{history.length}/{MAX_HISTORY}]
-        </span>
+        <h2 className="font-mono text-sm tracking-wider text-foreground font-semibold">EVENT HISTORY</h2>
+        <span className="font-mono text-[10px] tracking-wider text-muted-foreground">[{history.length}/{MAX_HISTORY}]</span>
         <div className="flex-1" />
         {history.length > 0 && (
           <button
@@ -509,7 +488,6 @@ function HistoryPanel({
           </button>
         )}
       </div>
-
       {history.length === 0 ? (
         <div className="px-4 py-10 text-center">
           <VscTerminal className="w-8 h-8 text-muted-foreground mx-auto mb-3 opacity-40" />
@@ -522,18 +500,10 @@ function HistoryPanel({
           <table className="w-full">
             <thead className="sticky top-0 bg-card border-b border-border z-10">
               <tr>
-                <th className="text-left px-4 py-2 font-mono text-[10px] tracking-wider text-muted-foreground font-normal uppercase">
-                  Timestamp
-                </th>
-                <th className="text-left px-4 py-2 font-mono text-[10px] tracking-wider text-muted-foreground font-normal uppercase">
-                  Event Name
-                </th>
-                <th className="text-left px-4 py-2 font-mono text-[10px] tracking-wider text-muted-foreground font-normal uppercase">
-                  Status
-                </th>
-                <th className="text-left px-4 py-2 font-mono text-[10px] tracking-wider text-muted-foreground font-normal uppercase">
-                  Response
-                </th>
+                <th className="text-left px-4 py-2 font-mono text-[10px] tracking-wider text-muted-foreground font-normal uppercase">Timestamp</th>
+                <th className="text-left px-4 py-2 font-mono text-[10px] tracking-wider text-muted-foreground font-normal uppercase">Event Name</th>
+                <th className="text-left px-4 py-2 font-mono text-[10px] tracking-wider text-muted-foreground font-normal uppercase">Status</th>
+                <th className="text-left px-4 py-2 font-mono text-[10px] tracking-wider text-muted-foreground font-normal uppercase">Response</th>
               </tr>
             </thead>
             <tbody>
@@ -548,300 +518,89 @@ function HistoryPanel({
   );
 }
 
-// --- Agent Info Panel ---
-
-function AgentInfoPanel({ activeAgentId }: { activeAgentId: string | null }) {
-  return (
-    <div className="border border-border bg-card px-4 py-3">
-      <div className="flex items-center gap-3">
-        <VscTerminal className="w-4 h-4 text-primary flex-shrink-0" />
-        <div className="flex items-center gap-2 flex-1 min-w-0">
-          <span className="font-mono text-[10px] tracking-wider text-muted-foreground uppercase">
-            Agent:
-          </span>
-          <span className="font-mono text-[11px] tracking-wider text-foreground truncate">
-            Event Tester Agent
-          </span>
-          <span className="font-mono text-[10px] tracking-wider text-muted-foreground hidden sm:inline">
-            [{EVENT_TESTER_AGENT_ID}]
-          </span>
-        </div>
-        <div className="flex items-center gap-1.5">
-          <VscCircleFilled
-            className={`w-2.5 h-2.5 ${activeAgentId ? 'text-primary animate-pulse' : 'text-muted-foreground'}`}
-          />
-          <span className="font-mono text-[10px] tracking-wider text-muted-foreground">
-            {activeAgentId ? 'PROCESSING' : 'IDLE'}
-          </span>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// --- Main Page Export ---
+// --- Main Page ---
 
 export default function Page() {
-  // Config state
-  const [config, setConfig] = useState<ConfigState>({
-    baseUrl: '',
-    authToken: '',
-  });
+  const [config, setConfig] = useState<ConfigState>({ baseUrl: '', authToken: '' });
   const [configSaved, setConfigSaved] = useState(false);
   const [showToken, setShowToken] = useState(false);
-
-  // Event history
   const [history, setHistory] = useState<EventHistoryEntry[]>([]);
-
-  // Loading states per event
   const [loadingEvents, setLoadingEvents] = useState<Record<string, boolean>>({});
-
-  // Inline notification
   const [notification, setNotification] = useState<InlineNotification | null>(null);
 
-  // Active agent tracking
-  const [activeAgentId, setActiveAgentId] = useState<string | null>(null);
-
-  const handleConfigChange = useCallback(
-    (field: keyof ConfigState, value: string) => {
-      setConfig((prev) => ({ ...prev, [field]: value }));
-      setConfigSaved(false);
-    },
-    []
-  );
+  const handleConfigChange = useCallback((field: keyof ConfigState, value: string) => {
+    setConfig((prev) => ({ ...prev, [field]: value }));
+    setConfigSaved(false);
+  }, []);
 
   const handleSaveConfig = useCallback(() => {
     if (config.baseUrl.trim()) {
       setConfigSaved(true);
-      showNotification('Endpoint configuration saved.', 'success');
+      setNotification({ id: generateId(), message: 'Endpoint configuration saved.', type: 'success' });
     }
   }, [config.baseUrl]);
 
-  const showNotification = useCallback(
-    (message: string, type: 'success' | 'error' | 'info') => {
-      setNotification({ id: generateId(), message, type });
-    },
-    []
-  );
-
-  const dismissNotification = useCallback(() => {
-    setNotification(null);
-  }, []);
+  const dismissNotification = useCallback(() => setNotification(null), []);
 
   const addHistoryEntry = useCallback((entry: EventHistoryEntry) => {
-    setHistory((prev) => {
-      const next = [entry, ...prev];
-      return next.slice(0, MAX_HISTORY);
-    });
-  }, []);
-
-  const updateHistoryEntry = useCallback((id: string, updates: Partial<EventHistoryEntry>) => {
-    setHistory((prev) =>
-      prev.map((entry) => (entry.id === id ? { ...entry, ...updates } : entry))
-    );
+    setHistory((prev) => [entry, ...prev].slice(0, MAX_HISTORY));
   }, []);
 
   const clearHistory = useCallback(() => {
     setHistory([]);
-    showNotification('Event history cleared.', 'info');
-  }, [showNotification]);
+    setNotification({ id: generateId(), message: 'Event history cleared.', type: 'info' });
+  }, []);
 
   const handleFireEvent = useCallback(
     async (eventName: string) => {
       if (!configSaved) return;
 
       setLoadingEvents((prev) => ({ ...prev, [eventName]: true }));
-      setActiveAgentId(EVENT_TESTER_AGENT_ID);
 
       try {
-        // Step 1: Call the agent to generate a test payload
-        const agentResult = await callAIAgent(
-          `Generate a test payload for the ${eventName} event`,
-          EVENT_TESTER_AGENT_ID
-        );
-
-        if (!agentResult?.success) {
-          const errMsg =
-            agentResult?.error ?? agentResult?.response?.message ?? 'Agent call failed';
-          showNotification(`Agent error: ${errMsg}`, 'error');
-          addHistoryEntry({
-            id: generateId(),
-            timestamp: new Date().toISOString(),
-            eventName,
-            statusCode: null,
-            responseBody: errMsg,
-            curlCommand: '',
-            payload: '',
-            success: false,
-            pending: false,
-          });
-          setLoadingEvents((prev) => ({ ...prev, [eventName]: false }));
-          setActiveAgentId(null);
-          return;
-        }
-
-        // Extract response data - handle multiple response shapes
-        let data: AgentResponse = {};
-        const rawResult = agentResult?.response?.result;
-        const rawMessage = agentResult?.response?.message;
-
-        // If result is a string (error or text response), try to parse it
-        if (typeof rawResult === 'string') {
-          try {
-            data = JSON.parse(rawResult);
-          } catch {
-            const errorText = rawResult || rawMessage || 'Agent returned non-JSON response';
-            showNotification(`Agent: ${errorText}`, 'error');
-            addHistoryEntry({
-              id: generateId(),
-              timestamp: new Date().toISOString(),
-              eventName,
-              statusCode: null,
-              responseBody: errorText,
-              curlCommand: '',
-              payload: '',
-              success: false,
-              pending: false,
-            });
-            setLoadingEvents((prev) => ({ ...prev, [eventName]: false }));
-            setActiveAgentId(null);
-            return;
-          }
-        } else if (rawResult && typeof rawResult === 'object') {
-          // Check if it's a text-type error response
-          if ('text' in rawResult && typeof rawResult.text === 'string' && !rawResult.event_name) {
-            showNotification(`Agent: ${rawResult.text}`, 'error');
-            addHistoryEntry({
-              id: generateId(),
-              timestamp: new Date().toISOString(),
-              eventName,
-              statusCode: null,
-              responseBody: rawResult.text,
-              curlCommand: '',
-              payload: '',
-              success: false,
-              pending: false,
-            });
-            setLoadingEvents((prev) => ({ ...prev, [eventName]: false }));
-            setActiveAgentId(null);
-            return;
-          }
-          data = rawResult as AgentResponse;
-        }
-
-        // Parse properties_json string into object if present
-        let parsedProperties: Record<string, unknown> = {};
-        if (data?.properties_json) {
-          try {
-            parsedProperties = JSON.parse(data.properties_json);
-          } catch {
-            parsedProperties = {};
-          }
-        } else if (data?.properties && typeof data.properties === 'object') {
-          parsedProperties = data.properties;
-        }
-
-        const payload = {
-          event: data?.event_name ?? eventName,
-          distinct_id: data?.distinct_id ?? crypto.randomUUID(),
-          timestamp: data?.timestamp ?? new Date().toISOString(),
-          properties: parsedProperties,
-        };
-
+        // Build payload client-side with realistic test data
+        const payload = buildPayload(eventName);
         const trackUrl = `${config.baseUrl.replace(/\/$/, '')}/track`;
         const curlCmd = buildCurlCommand(trackUrl, config.authToken, payload);
         const payloadStr = JSON.stringify(payload, null, 2);
-        const entryId = generateId();
-        const isLocalhost = isLocalhostUrl(config.baseUrl);
 
-        if (isLocalhost) {
-          // Localhost: cannot reach from sandbox -- generate payload + curl, mark as READY
-          addHistoryEntry({
-            id: entryId,
-            timestamp: new Date().toISOString(),
-            eventName: payload.event,
-            statusCode: null,
-            responseBody: '',
-            curlCommand: curlCmd,
-            payload: payloadStr,
-            success: true,
-            pending: true,
-          });
+        // POST through the server-side proxy at /api/track
+        // The proxy forwards to the user's configured target_url
+        const proxyResponse = await fetch('/api/track', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            target_url: trackUrl,
+            auth_token: config.authToken,
+            payload,
+          }),
+        });
 
-          showNotification(
-            `Payload generated for ${payload.event}. Copy the curl command from history to run locally.`,
-            'success'
-          );
-        } else {
-          // Public URL: attempt direct POST, also provide curl as fallback
-          addHistoryEntry({
-            id: entryId,
-            timestamp: new Date().toISOString(),
-            eventName: payload.event,
-            statusCode: null,
-            responseBody: 'Sending...',
-            curlCommand: curlCmd,
-            payload: payloadStr,
-            success: false,
-            pending: true,
-          });
+        const proxyData = await proxyResponse.json();
+        const statusCode: number | null = proxyData.status_code ?? proxyResponse.status;
+        const responseBody: string = proxyData.body ?? JSON.stringify(proxyData);
+        const isSuccess = statusCode !== null && statusCode >= 200 && statusCode < 300;
 
-          const trackHeaders: Record<string, string> = {
-            'Content-Type': 'application/json',
-          };
-          if (config.authToken.trim()) {
-            trackHeaders['Authorization'] = `Bearer ${config.authToken}`;
-          }
+        addHistoryEntry({
+          id: generateId(),
+          timestamp: new Date().toISOString(),
+          eventName,
+          statusCode,
+          responseBody,
+          curlCommand: curlCmd,
+          payload: payloadStr,
+          success: isSuccess,
+        });
 
-          try {
-            const response = await fetch(trackUrl, {
-              method: 'POST',
-              headers: trackHeaders,
-              body: JSON.stringify(payload),
-            });
-
-            let responseText = '';
-            try {
-              responseText = await response.text();
-            } catch {
-              responseText = '(unable to read response body)';
-            }
-
-            const isSuccess = response.status >= 200 && response.status < 300;
-
-            updateHistoryEntry(entryId, {
-              statusCode: response.status,
-              responseBody: responseText,
-              success: isSuccess,
-              pending: false,
-            });
-
-            showNotification(
-              isSuccess
-                ? `${payload.event} -- ${response.status} OK${data?.status_message ? ' -- ' + data.status_message : ''}`
-                : `${payload.event} -- ${response.status} FAILED`,
-              isSuccess ? 'success' : 'error'
-            );
-          } catch (networkErr) {
-            const errMsg =
-              networkErr instanceof Error ? networkErr.message : 'Network error';
-
-            updateHistoryEntry(entryId, {
-              statusCode: null,
-              responseBody: `Network error: ${errMsg}. Use the curl command instead.`,
-              success: false,
-              pending: false,
-            });
-
-            showNotification(
-              `Cannot reach ${trackUrl}. Curl command available in history.`,
-              'error'
-            );
-          }
-        }
+        setNotification({
+          id: generateId(),
+          message: isSuccess
+            ? `${eventName} -- ${statusCode} OK`
+            : `${eventName} -- ${statusCode ?? 'ERR'} ${proxyData.status_text || 'FAILED'}. Curl command available in history.`,
+          type: isSuccess ? 'success' : 'error',
+        });
       } catch (err) {
         const errMsg = err instanceof Error ? err.message : 'Unknown error';
-        showNotification(`Error: ${errMsg}`, 'error');
         addHistoryEntry({
           id: generateId(),
           timestamp: new Date().toISOString(),
@@ -851,14 +610,13 @@ export default function Page() {
           curlCommand: '',
           payload: '',
           success: false,
-          pending: false,
         });
+        setNotification({ id: generateId(), message: `Error: ${errMsg}`, type: 'error' });
       } finally {
         setLoadingEvents((prev) => ({ ...prev, [eventName]: false }));
-        setActiveAgentId(null);
       }
     },
-    [configSaved, config, showNotification, addHistoryEntry, updateHistoryEntry]
+    [configSaved, config, addHistoryEntry]
   );
 
   return (
@@ -869,23 +627,15 @@ export default function Page() {
           <div className="max-w-6xl mx-auto px-4 py-3 flex items-center justify-between">
             <div className="flex items-center gap-3">
               <VscTerminal className="w-5 h-5 text-primary" />
-              <h1 className="text-sm font-semibold text-foreground tracking-widest uppercase">
-                Event Tracker
-              </h1>
-              <span className="text-[10px] text-muted-foreground tracking-wider border border-border px-2 py-0.5">
-                v1.0
-              </span>
+              <h1 className="text-sm font-semibold text-foreground tracking-widest uppercase">Event Tracker</h1>
+              <span className="text-[10px] text-muted-foreground tracking-wider border border-border px-2 py-0.5">v1.0</span>
             </div>
           </div>
         </header>
 
         {/* Main Content */}
         <main className="max-w-6xl mx-auto px-4 py-4 space-y-4">
-          {/* Inline Notification */}
-          <NotificationBar
-            notification={notification}
-            onDismiss={dismissNotification}
-          />
+          <NotificationBar notification={notification} onDismiss={dismissNotification} />
 
           {/* Config Panel (sticky) */}
           <div className="sticky top-0 z-10">
@@ -901,13 +651,10 @@ export default function Page() {
 
           {/* Event Button Grid */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {/* Agent Lifecycle */}
             <div className="border border-border bg-card">
               <div className="flex items-center gap-2 px-4 py-3 border-b border-border">
                 <VscGear className="w-3.5 h-3.5 text-primary" />
-                <h3 className="font-mono text-xs tracking-wider text-foreground font-semibold uppercase">
-                  Agent Lifecycle
-                </h3>
+                <h3 className="font-mono text-xs tracking-wider text-foreground font-semibold uppercase">Agent Lifecycle</h3>
               </div>
               <div className="p-3 space-y-2">
                 {AGENT_LIFECYCLE_EVENTS.map((evt) => (
@@ -921,14 +668,10 @@ export default function Page() {
                 ))}
               </div>
             </div>
-
-            {/* User Actions */}
             <div className="border border-border bg-card">
               <div className="flex items-center gap-2 px-4 py-3 border-b border-border">
                 <VscPlay className="w-3.5 h-3.5 text-primary" />
-                <h3 className="font-mono text-xs tracking-wider text-foreground font-semibold uppercase">
-                  User Actions
-                </h3>
+                <h3 className="font-mono text-xs tracking-wider text-foreground font-semibold uppercase">User Actions</h3>
               </div>
               <div className="p-3 space-y-2">
                 {USER_ACTION_EVENTS.map((evt) => (
@@ -955,24 +698,14 @@ export default function Page() {
           )}
 
           {/* Event History */}
-          <HistoryPanel
-            history={history}
-            onClear={clearHistory}
-          />
-
-          {/* Agent Info */}
-          <AgentInfoPanel activeAgentId={activeAgentId} />
+          <HistoryPanel history={history} onClear={clearHistory} />
         </main>
 
         {/* Footer */}
         <footer className="border-t border-border mt-8">
           <div className="max-w-6xl mx-auto px-4 py-3 flex items-center justify-between">
-            <span className="font-mono text-[10px] tracking-wider text-muted-foreground">
-              EVENT TRACKER TESTING UI
-            </span>
-            <span className="font-mono text-[10px] tracking-wider text-muted-foreground">
-              POWERED BY LYZR AGENT
-            </span>
+            <span className="font-mono text-[10px] tracking-wider text-muted-foreground">EVENT TRACKER TESTING UI</span>
+            <span className="font-mono text-[10px] tracking-wider text-muted-foreground">POWERED BY LYZR</span>
           </div>
         </footer>
       </div>
